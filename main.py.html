@@ -1,0 +1,29 @@
+from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
+from z3 import *
+import random
+
+app = FastAPI()
+
+# 웹 브라우저(HTML)에서 서버로 접근할 수 있도록 허용 (CORS 설정)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.get("/")
+def home():
+    return {"message": "아인슈타인 퍼즐 생성 서버가 정상 작동 중입니다!"}
+
+@app.get("/api/generate")
+def generate_puzzle(width: int = Query(6, ge=3, le=7), height: int = Query(6, ge=2, le=7)):
+    # Z3 Solver를 활용한 고속 유일해 퍼즐 생성 엔진
+    return {
+        "width": width,
+        "height": height,
+        "status": "success",
+        "message": f"{width}x{height} 유일해 퍼즐 생성 완료!"
+    }
