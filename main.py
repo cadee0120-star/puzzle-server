@@ -2,7 +2,6 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from z3 import *
 import random
-import time
 
 app = FastAPI()
 
@@ -86,23 +85,11 @@ def attach_josa(word, j_type):
     return f"'{word}'"
 
 def format_natural_clue(itemA, typeA, itemB, typeB, clueType, param=None):
-    if clueType == 'NOT_SAME':
-        if typeB in ['job', 'field', 'rank']:
-            return f"{attach_josa(itemA, '은는')} {attach_josa(itemB, '이가')} 아니다."
-        elif typeB in ['item', 'drink', 'food', 'knife', 'gear', 'tool', 'dessert']:
-            return f"{attach_josa(itemA, '은는')} {attach_josa(itemB, '을를')} 사용(소비)하지 않는다."
-        elif typeB in ['house', 'planet', 'sector', 'place']:
-            return f"{attach_josa(itemA, '은는')} {attach_josa(itemB, '에')} 위치해 있지 않다."
-        elif typeB == 'pet':
-            return f"{attach_josa(itemA, '은는')} {attach_josa(itemB, '을를')} 기르지 않는다."
-        return f"{attach_josa(itemA, '와과')} {attach_josa(itemB, '은는')} 함께 위치하지 않는다."
-
     if clueType == 'SAME':
         if typeB in ['job', 'rank']: return f"{attach_josa(itemA, '은는')} {attach_josa(itemB, '이다')}."
         if typeB in ['house', 'planet', 'sector', 'place']: return f"{attach_josa(itemA, '은는')} {attach_josa(itemB, '에')} 있다."
         if typeB in ['item', 'food', 'drink', 'gear', 'tool', 'dessert']: return f"{attach_josa(itemA, '은는')} {attach_josa(itemB, '을를')} 선택(사용)한다."
         return f"{attach_josa(itemA, '와과')} {attach_josa(itemB, '은는')} 같은 위치에 배치된다."
-
     if clueType == 'ADJACENT': return f"{attach_josa(itemA, '와과')} {attach_josa(itemB, '은는')} 바로 옆에 위치한다."
     if clueType == 'GAP_1': return f"{attach_josa(itemA, '와과')} {attach_josa(itemB, '은는')} 사이에 정확히 1개의 공간을 두고 있다."
     if clueType == 'NOT_EDGE': return f"{attach_josa(itemA, '은는')} 대열의 양 끝에 위치하지 않는다."
@@ -110,9 +97,9 @@ def format_natural_clue(itemA, typeA, itemB, typeB, clueType, param=None):
     if clueType == 'DIRECT_POS': return f"{attach_josa(itemA, '은는')} {param}번 공간에 위치한다."
     return ""
 
-def count_z3_solutions(width, height, headers, elements, clues, timeout_ms=3000):
+def check_uniqueness(width, height, headers, elements, clues):
     s = Solver()
-    s.set("timeout", timeout_ms)
+    s.set("timeout", 1000)
     grid = {}
     for r, h in enumerate(headers):
         for c in range(width):
@@ -135,11 +122,8 @@ def count_z3_solutions(width, height, headers, elements, clues, timeout_ms=3000)
             r2 = headers.index(cl['h2'])
             idxB = elements[cl['h2']].index(cl['e2'])
             posB = grid[(r2, idxB)]
-
             if cl['type'] == 'SAME':
                 s.add(posA == posB)
-            elif cl['type'] == 'NOT_SAME':
-                s.add(posA != posB)
             elif cl['type'] == 'ADJACENT':
                 s.add(Or(posA - posB == 1, posB - posA == 1))
             elif cl['type'] == 'GAP_1':
@@ -148,16 +132,11 @@ def count_z3_solutions(width, height, headers, elements, clues, timeout_ms=3000)
     sol_count = 0
     while s.check() == sat:
         sol_count += 1
+        if sol_count >= 2: break
         m = s.model()
-        block = []
-        for r, h in enumerate(headers):
-            for c in range(width):
-                val = m[grid[(r, c)]].as_long()
-                block.append(grid[(r, c)] != val)
+        block = [grid[(r, c)] != m[grid[(r, c)]].as_long() for r in range(height) for c in range(width)]
         s.add(Or(block))
-        if sol_count >= 2:
-            break
-    return sol_count
+    return sol_count == 1
 
 @app.get("/")
 def home():
@@ -172,78 +151,62 @@ def generate_puzzle(width: int = Query(6, ge=3, le=7), height: int = Query(6, ge
     
     shuffled_pools = [random.sample(p[:width], width) for p in t_data["pools"][:height]]
     
-    actual_elements = {}
-    for idx, h in enumerate(sel_headers):
-        actual_elements[h] = shuffled_pools[idx]
+    actual_elements = {h: shuffled_pools[idx] for idx, h in enumerate(sel_headers)}
+    solution_matrix = [{h: shuffled_pools[col_idx][i] for col_idx, h in enumerate(sel_headers)} for i in range(width)]
 
-    solution_matrix = []
-    for i in range(width):
-        row = {}
-        for col_idx, h in enumerate(sel_headers):
-            row[h] = shuffled_pools[col_idx][i]
-        solution_matrix.append(row)
-
-    indirect_candidates = []
-
-    # 간접 힌트 우선 생성
-    for h1 in range(height):
-        for h2 in range(h1 + 1, height):
-            for i in range(width):
-                itemA = solution_matrix[i][sel_headers[h1]]
-                itemB = solution_matrix[i][sel_headers[h2]]
-                indirect_candidates.append({
-                    'type': 'SAME', 'h1': sel_headers[h1], 'e1': itemA, 'h2': sel_headers[h2], 'e2': itemB,
-                    'text': format_natural_clue(itemA, sel_types[h1], itemB, sel_types[h2], 'SAME')
-                })
-
-    for h1 in range(height):
-        for h2 in range(height):
-            if h1 == h2: continue
-            for i in range(width):
-                for j in range(width):
-                    if i == j: continue
-                    itemA = solution_matrix[i][sel_headers[h1]]
-                    itemB = solution_matrix[j][sel_headers[h2]]
-                    dist = abs(i - j)
-                    if dist == 1:
-                        indirect_candidates.append({
-                            'type': 'ADJACENT', 'h1': sel_headers[h1], 'e1': itemA, 'h2': sel_headers[h2], 'e2': itemB,
-                            'text': format_natural_clue(itemA, sel_types[h1], itemB, sel_types[h2], 'ADJACENT')
-                        })
-                    elif dist == 2:
-                        indirect_candidates.append({
-                            'type': 'GAP_1', 'h1': sel_headers[h1], 'e1': itemA, 'h2': sel_headers[h2], 'e2': itemB,
-                            'text': format_natural_clue(itemA, sel_types[h1], itemB, sel_types[h2], 'GAP_1')
-                        })
-
-    random.shuffle(indirect_candidates)
     selected_clues = []
 
-    # 유일해 판별 (최대 3초 내로 빠르게 단서 수집)
-    for cl in indirect_candidates:
-        selected_clues.append(cl)
-        if len(selected_clues) >= width * height * 1.5:
-            if count_z3_solutions(width, height, sel_headers, actual_elements, selected_clues) == 1:
-                break
+    # 1. 앵커(위치 기준) 간접 힌트 최소 2개 배치 (양끝 / 위치)
+    ref_h = sel_headers[0]
+    for i in range(width):
+        item = solution_matrix[i][ref_h]
+        if i == 0 or i == width - 1:
+            selected_clues.append({
+                'type': 'IS_EDGE', 'h1': ref_h, 'e1': item,
+                'text': format_natural_clue(item, sel_types[0], None, None, 'IS_EDGE')
+            })
+        else:
+            selected_clues.append({
+                'type': 'NOT_EDGE', 'h1': ref_h, 'e1': item,
+                'text': format_natural_clue(item, sel_types[0], None, None, 'NOT_EDGE')
+            })
 
-    # 직접 힌트 최소한 보충
-    if count_z3_solutions(width, height, sel_headers, actual_elements, selected_clues) != 1:
-        for h in range(height):
-            for i in range(width):
-                itemA = solution_matrix[i][sel_headers[h]]
-                cl = {
-                    'type': 'DIRECT_POS', 'h1': sel_headers[h], 'e1': itemA, 'param': i + 1,
-                    'text': format_natural_clue(itemA, sel_types[h], None, None, 'DIRECT_POS', i + 1)
-                }
-                selected_clues.append(cl)
-                if count_z3_solutions(width, height, sel_headers, actual_elements, selected_clues) == 1:
-                    break
+    # 2. 카테고리 간 동등(SAME) 단서로 사슬 연결
+    for h1_idx in range(height - 1):
+        h1 = sel_headers[h1_idx]
+        h2 = sel_headers[h1_idx + 1]
+        for i in range(width):
+            itemA = solution_matrix[i][h1]
+            itemB = solution_matrix[i][h2]
+            selected_clues.append({
+                'type': 'SAME', 'h1': h1, 'e1': itemA, 'h2': h2, 'e2': itemB,
+                'text': format_natural_clue(itemA, sel_types[h1_idx], itemB, sel_types[h1_idx+1], 'SAME')
+            })
 
-    # 중복 단서 제거 (속도를 위해 샘플링 적용)
-    prune_limit = min(len(selected_clues), 25)
-    for i in range(prune_limit - 1, -1, -1):
+    # 3. 인접/간격 단서 추가하여 구분감 제공
+    for i in range(width - 1):
+        h_idx = random.randint(0, height - 1)
+        itemA = solution_matrix[i][sel_headers[h_idx]]
+        itemB = solution_matrix[i+1][sel_headers[h_idx]]
+        selected_clues.append({
+            'type': 'ADJACENT', 'h1': sel_headers[h_idx], 'e1': itemA, 'h2': sel_headers[h_idx], 'e2': itemB,
+            'text': format_natural_clue(itemA, sel_types[h_idx], itemB, sel_types[h_idx], 'ADJACENT')
+        })
+
+    # 4. 만약 여전히 유일해가 안 만들어졌다면 직접 위치 힌트 1개 보충
+    if not check_uniqueness(width, height, sel_headers, actual_elements, selected_clues):
+        item_dp = solution_matrix[0][sel_headers[0]]
+        selected_clues.append({
+            'type': 'DIRECT_POS', 'h1': sel_headers[0], 'e1': item_dp, 'param': 1,
+            'text': format_natural_clue(item_dp, sel_types[0], None, None, 'DIRECT_POS', 1)
+        })
+
+    # 5. 불필요 단서 스마트 제거 (최대 10개만 경량화 가지치기)
+    random.shuffle(selected_clues)
+    for i in range(len(selected_clues) - 1, -1, -1):
+        if len(selected_clues) <= width * 2: break
         temp_clues = [c for idx, c in enumerate(selected_clues) if idx != i]
-        if count_z3_solutions(width, height, sel_headers, actual_elements, temp_clues) == 1:
+        if check_uniqueness(width, height, sel_headers, actual_elements, temp_clues):
             selected_clues.pop(i)
 
     final_clue_texts = [c['text'] for c in selected_clues]
