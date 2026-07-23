@@ -2,6 +2,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from z3 import *
 import random
+import time
 
 app = FastAPI()
 
@@ -109,8 +110,9 @@ def format_natural_clue(itemA, typeA, itemB, typeB, clueType, param=None):
     if clueType == 'DIRECT_POS': return f"{attach_josa(itemA, '은는')} {param}번 공간에 위치한다."
     return ""
 
-def count_z3_solutions(width, height, headers, elements, clues, max_limit=2):
+def count_z3_solutions(width, height, headers, elements, clues, timeout_ms=3000):
     s = Solver()
+    s.set("timeout", timeout_ms)
     grid = {}
     for r, h in enumerate(headers):
         for c in range(width):
@@ -144,19 +146,16 @@ def count_z3_solutions(width, height, headers, elements, clues, max_limit=2):
                 s.add(Or(posA - posB == 2, posB - posA == 2))
 
     sol_count = 0
-    solutions = []
     while s.check() == sat:
         sol_count += 1
         m = s.model()
-        cur_sol = {}
         block = []
         for r, h in enumerate(headers):
             for c in range(width):
                 val = m[grid[(r, c)]].as_long()
                 block.append(grid[(r, c)] != val)
-        solutions.append(m)
         s.add(Or(block))
-        if sol_count >= max_limit:
+        if sol_count >= 2:
             break
     return sol_count
 
@@ -185,9 +184,8 @@ def generate_puzzle(width: int = Query(6, ge=3, le=7), height: int = Query(6, ge
         solution_matrix.append(row)
 
     indirect_candidates = []
-    direct_candidates = []
 
-    # 1. 간접 힌트 생성 (우선순위)
+    # 간접 힌트 우선 생성
     for h1 in range(height):
         for h2 in range(h1 + 1, height):
             for i in range(width):
@@ -200,6 +198,7 @@ def generate_puzzle(width: int = Query(6, ge=3, le=7), height: int = Query(6, ge
 
     for h1 in range(height):
         for h2 in range(height):
+            if h1 == h2: continue
             for i in range(width):
                 for j in range(width):
                     if i == j: continue
@@ -217,49 +216,32 @@ def generate_puzzle(width: int = Query(6, ge=3, le=7), height: int = Query(6, ge
                             'text': format_natural_clue(itemA, sel_types[h1], itemB, sel_types[h2], 'GAP_1')
                         })
 
-    for h in range(height):
-        for i in range(width):
-            itemA = solution_matrix[i][sel_headers[h]]
-            if i in [0, width - 1]:
-                indirect_candidates.append({
-                    'type': 'IS_EDGE', 'h1': sel_headers[h], 'e1': itemA,
-                    'text': format_natural_clue(itemA, sel_types[h], None, None, 'IS_EDGE')
-                })
-            else:
-                indirect_candidates.append({
-                    'type': 'NOT_EDGE', 'h1': sel_headers[h], 'e1': itemA,
-                    'text': format_natural_clue(itemA, sel_types[h], None, None, 'NOT_EDGE')
-                })
-
-    # 2. 직접 힌트 생성 (최소한만 사용)
-    for h in range(height):
-        for i in range(width):
-            itemA = solution_matrix[i][sel_headers[h]]
-            direct_candidates.append({
-                'type': 'DIRECT_POS', 'h1': sel_headers[h], 'e1': itemA, 'param': i + 1,
-                'text': format_natural_clue(itemA, sel_types[h], None, None, 'DIRECT_POS', i + 1)
-            })
-
     random.shuffle(indirect_candidates)
-    random.shuffle(direct_candidates)
-
     selected_clues = []
 
-    # [Step 1] 유일해(Count === 1) 만족시까지 간접 힌트 누적
+    # 유일해 판별 (최대 3초 내로 빠르게 단서 수집)
     for cl in indirect_candidates:
         selected_clues.append(cl)
-        if count_z3_solutions(width, height, sel_headers, actual_elements, selected_clues) == 1:
-            break
-
-    # [Step 2] 부족할 경우 직접 힌트 최소한 보충
-    if count_z3_solutions(width, height, sel_headers, actual_elements, selected_clues) != 1:
-        for cl in direct_candidates:
-            selected_clues.append(cl)
+        if len(selected_clues) >= width * height * 1.5:
             if count_z3_solutions(width, height, sel_headers, actual_elements, selected_clues) == 1:
                 break
 
-    # [Step 3] 중복 및 불필요 단서 100% 제거 (Pruning)
-    for i in range(len(selected_clues) - 1, -1, -1):
+    # 직접 힌트 최소한 보충
+    if count_z3_solutions(width, height, sel_headers, actual_elements, selected_clues) != 1:
+        for h in range(height):
+            for i in range(width):
+                itemA = solution_matrix[i][sel_headers[h]]
+                cl = {
+                    'type': 'DIRECT_POS', 'h1': sel_headers[h], 'e1': itemA, 'param': i + 1,
+                    'text': format_natural_clue(itemA, sel_types[h], None, None, 'DIRECT_POS', i + 1)
+                }
+                selected_clues.append(cl)
+                if count_z3_solutions(width, height, sel_headers, actual_elements, selected_clues) == 1:
+                    break
+
+    # 중복 단서 제거 (속도를 위해 샘플링 적용)
+    prune_limit = min(len(selected_clues), 25)
+    for i in range(prune_limit - 1, -1, -1):
         temp_clues = [c for idx, c in enumerate(selected_clues) if idx != i]
         if count_z3_solutions(width, height, sel_headers, actual_elements, temp_clues) == 1:
             selected_clues.pop(i)
